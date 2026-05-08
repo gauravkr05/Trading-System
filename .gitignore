@@ -1,0 +1,30 @@
+
+@"
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Data and logs (these are too large and regeneratable)
+data/*.sqlite
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/*.csv
+data/
+
+# Trained models (regeneratable)
+models/*.joblib
+models/
+
+# Environment files (don't push API keys)
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+"@ | Out-File -FilePath .gitignore -Encoding utf8
