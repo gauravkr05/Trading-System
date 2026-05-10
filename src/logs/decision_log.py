@@ -26,9 +26,9 @@ from typing import Any
 
 LAYER_COLUMNS = [
     "scanner", "portfolio", "filter", "bias",
-    "entry_state", "entry_trigger",
+    "entry_state", "entry_exhaustion", "entry_trigger",
     "features", "regression", "claude",
-    "sizing", "order", "outcome",
+    "sizing", "order", "outcome", "costs",
 ]
 
 

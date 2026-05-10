@@ -37,13 +37,26 @@ entry_layer:
 
   # Stage 2 trigger
   pattern_body_ratio: 0.6     # body must be at least this fraction of range for engulfing
-  wick_ratio_min: 2.0         # wick must be this many times body for hammer / shooting star
+  wick_ratio_min: 2.0 
+  
+  observability:
+    bias_continuity_lookback: 30   # max bars to look back for "bars since cross"
+    pullback_lookback: 20  
+    
+  exhaustion:
+    enabled: true
+    max_distance_from_ma_atr: 1.5   # reject if close > 1.8 ATR from MA in bias direction
+    min_pullback_depth_atr: 0.4     # reject if entering within 0.4 ATR of recent swing extreme      # wick must be this many times body for hammer / shooting star
+  
 
 risk_sizing:
   stop_atr_mult: 2.0
-  target_atr_mult: 6.0
-  account_equity: 100000.0
-  risk_per_trade_pct: 0.01    # risk 1% of equity per trade
+  target_atr_mult: 3.0
+  account_equity: 80000.0
+  risk_per_trade_pct: 0.0025
+  allow_shorts: true
+      # risk 1% of equity per trade
+      # risk 1% of equity per trade
 
 regression:
   model_path: "models/regression_model.joblib"
@@ -58,6 +71,7 @@ regression:
     - expansion_ratio
     - level_distance_atr
     - pattern_strength
+  gatekeeper_enabled: false
 
 confidence_gate:
   # the regression outputs y_hat (expected R-multiple).
@@ -65,23 +79,15 @@ confidence_gate:
   far_positive_threshold: 0.6  # y_hat >= this -> take, skip Claude
   far_negative_threshold: -0.2 # y_hat <= this -> NO_TRADE, skip Claude
   # anything in between is borderline and goes to Claude.
-
-# claude_mcp:
-#   enabled: true               # when false, borderline cases fall back to a heuristic
-#   model: "claude-opus-4-5"
-#   api_key_env: "ANTHROPIC_API_KEY"
-
-# groq:
-#   enabled: true
-#   model: "llama-3.3-70b-versatile"
-#   api_key_env: "GROQ_API_KEY"        # <-- add this
-#   max_tokens: 1000
-#   temperature: 0.2
-
+  
 manage:
   trail_start_r: 1.0
   trail_step_r: 999.0    # huge step = only the first ratchet fires
-  trail_offset_r: 1.0    # at MFE 1.0R, stop -> entry, never moves again   # stop sits this far below current step level
+  trail_offset_r: 1.0
+  eod_exit: true
+  eod_hour: 15        # 3:00 PM IST (15:00) — was 9 (UTC)
+  eod_minute: 0       # was 30 (UTC)
+  eod_block_entries: true    # at MFE 1.0R, stop -> entry, never moves again   # stop sits this far below current step level
                          # offset=1.0 means: at MFE 1.0 stop=entry; at MFE 1.5 stop=+0.5R; etc.
 
 ollama:
@@ -89,6 +95,13 @@ ollama:
   model: llama3.1:latest          # match exactly what `ollama list` shows
   temperature: 0.2
   timeout_seconds: 120
+
+costs:
+  slippage_entry_pct: 0.0010      # 0.10% on entries (mid-cap default)
+  slippage_target_pct: 0.0010     # 0.10% on target exits
+  slippage_stop_pct: 0.0025       # 0.25% on stop-outs (slippage is worse here)
+  brokerage_round_trip: 40.0      # rupees, Zerodha/Upstox-style
+  other_charges_pct: 0.0008       # STT + exchange + GST + stamp duty      # STT + exchange + GST + stamp duty combined
 
 decision_log:
   db_path: "data/decision_log.sqlite"

@@ -10,6 +10,7 @@ Rules from the architecture diagram:
 
 Strength is the count of confirmers that agree (0, 1, or 2).
 """
+
 from __future__ import annotations
 
 import pandas as pd

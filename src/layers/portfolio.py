@@ -11,6 +11,7 @@ Manage path decides what to do with an already-open position on each new bar:
   - (extension point: add to winners)
 """
 from __future__ import annotations
+import pandas as pd
 
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -67,45 +68,6 @@ class Portfolio:
         return self.positions.get(symbol)
 
 
-# def manage_path(position: Position, current_bar: dict) -> dict:
-#     """
-#     Decide hold / exit / add for an existing position.
-#     Returns a dict describing the decision and any realized R-multiple if exited.
-#     """
-#     high = current_bar["high"]
-#     low = current_bar["low"]
-#     close = current_bar["close"]
-#     position.bars_held += 1
-
-#     risk_per_share = abs(position.entry_price - position.stop)
-#     if risk_per_share <= 0:
-#         return {"action": "hold", "bars_held": position.bars_held}
-
-#     if position.side == "long":
-#         if low <= position.stop:
-#             r = (position.stop - position.entry_price) / risk_per_share
-#             return {"action": "exit", "exit_reason": "stop", "exit_price": position.stop,
-#                     "realized_r": float(r), "bars_held": position.bars_held}
-#         if high >= position.target:
-#             r = (position.target - position.entry_price) / risk_per_share
-#             return {"action": "exit", "exit_reason": "target", "exit_price": position.target,
-#                     "realized_r": float(r), "bars_held": position.bars_held}
-#     else:  # short
-#         if high >= position.stop:
-#             r = (position.entry_price - position.stop) / risk_per_share
-#             return {"action": "exit", "exit_reason": "stop", "exit_price": position.stop,
-#                     "realized_r": float(r), "bars_held": position.bars_held}
-#         if low <= position.target:
-#             r = (position.entry_price - position.target) / risk_per_share
-#             return {"action": "exit", "exit_reason": "target", "exit_price": position.target,
-#                     "realized_r": float(r), "bars_held": position.bars_held}
-
-#     unrealized = ((close - position.entry_price) / risk_per_share
-#                   if position.side == "long"
-#                   else (position.entry_price - close) / risk_per_share)
-#     return {"action": "hold", "bars_held": position.bars_held,
-#             "unrealized_r": float(unrealized)}
-
 def manage_path(position: Position, current_bar: dict, cfg: dict | None = None) -> dict:
     """
     Decide hold / exit / add for an existing position.
@@ -127,6 +89,47 @@ def manage_path(position: Position, current_bar: dict, cfg: dict | None = None) 
     risk_per_share = abs(position.entry_price - position.initial_stop)
     if risk_per_share <= 0:
         return {"action": "hold", "bars_held": position.bars_held}
+        # --- End-of-day force exit (intraday strategy) ---
+    # Your data timestamps are in UTC. Indian market last 15-min bar starts
+    # at 09:45 UTC (= 15:15 IST = 3:15 PM IST). Exiting on this bar leaves
+    # us flat before market close at 09:45 UTC bar's close.
+    manage_cfg = (cfg or {}).get("manage", {})
+    eod_exit_enabled = manage_cfg.get("eod_exit", True)
+
+    if eod_exit_enabled:
+        ts = current_bar.get("timestamp")
+        if isinstance(ts, str):
+            ts = pd.to_datetime(ts)
+        eod_hour = manage_cfg.get("eod_hour", 15)       # 3:00 PM IST
+        eod_minute = manage_cfg.get("eod_minute", 0)
+        if ts is not None and ts.hour == eod_hour and ts.minute == eod_minute:
+            # Force exit at this bar's close
+            if position.side == "long":
+                r = (close - position.entry_price) / risk_per_share
+            else:
+                r = (position.entry_price - close) / risk_per_share
+
+            # Update MFE/MAE one last time before exit
+            if position.side == "long":
+                position.mfe_price = max(position.mfe_price, min(high, position.target))
+                position.mae_price = min(position.mae_price, max(low, position.stop))
+                mfe_r = (position.mfe_price - position.entry_price) / risk_per_share
+                mae_r = (position.mae_price - position.entry_price) / risk_per_share
+            else:
+                position.mfe_price = min(position.mfe_price, max(low, position.target))
+                position.mae_price = max(position.mae_price, min(high, position.stop))
+                mfe_r = (position.entry_price - position.mfe_price) / risk_per_share
+                mae_r = (position.entry_price - position.mae_price) / risk_per_share
+
+            return {
+                "action": "exit",
+                "exit_reason": "eod",
+                "exit_price": close,
+                "realized_r": float(r),
+                "bars_held": position.bars_held,
+                "mfe_r": float(mfe_r),
+                "mae_r": float(mae_r),
+            }
 
     # --- update MFE / MAE (capped at target/stop bounds) ---
     if position.side == "long":
@@ -149,7 +152,7 @@ def manage_path(position: Position, current_bar: dict, cfg: dict | None = None) 
         mae_r = (position.entry_price - position.mae_price) / risk_per_share
 
     # --- stepped trailing stop ---
-    manage_cfg = (cfg or {}).get("manage", {})
+    # manage_cfg = (cfg or {}).get("manage", {})
     trail_start_r = manage_cfg.get("trail_start_r", 1.0)   # first ratchet at this MFE
     trail_step_r = manage_cfg.get("trail_step_r", 0.5)     # ratchet every this many R
     trail_offset_r = manage_cfg.get("trail_offset_r", 1.0) # stop = entry + (step_r - offset)
@@ -176,37 +179,59 @@ def manage_path(position: Position, current_bar: dict, cfg: dict | None = None) 
     # --- exit checks (use position.stop, which may have been ratcheted) ---
     if position.side == "long":
         if low <= position.stop:
-            r = (position.stop - position.entry_price) / risk_per_share
+            # Gap detection: if bar OPENED below stop, fill at open (worse than stop)
+            open_price = current_bar.get("open", position.stop)
+            if open_price < position.stop:
+                fill_price = open_price
+                exit_reason = "gap_stop"
+            else:
+                fill_price = position.stop
+                exit_reason = "trail_stop" if position.highest_stop_step_r > 0 else "stop"
+            r = (fill_price - position.entry_price) / risk_per_share
             return {
                 "action": "exit",
-                "exit_reason": "trail_stop" if position.highest_stop_step_r > 0 else "stop",
-                "exit_price": position.stop, "realized_r": float(r),
+                "exit_reason": exit_reason,
+                "exit_price": fill_price, "realized_r": float(r),
                 "bars_held": position.bars_held,
                 "mfe_r": float(mfe_r), "mae_r": float(mae_r),
             }
         if high >= position.target:
-            r = (position.target - position.entry_price) / risk_per_share
+            # Gap up past target = bonus fill (rare but model honestly)
+            open_price = current_bar.get("open", position.target)
+            fill_price = max(position.target, open_price) if open_price > position.target else position.target
+            exit_reason = "gap_target" if open_price > position.target else "target"
+            r = (fill_price - position.entry_price) / risk_per_share
             return {
-                "action": "exit", "exit_reason": "target",
-                "exit_price": position.target, "realized_r": float(r),
+                "action": "exit", "exit_reason": exit_reason,
+                "exit_price": fill_price, "realized_r": float(r),
                 "bars_held": position.bars_held,
                 "mfe_r": float(mfe_r), "mae_r": float(mae_r),
             }
     else:  # short
         if high >= position.stop:
-            r = (position.entry_price - position.stop) / risk_per_share
+            open_price = current_bar.get("open", position.stop)
+            if open_price > position.stop:
+                fill_price = open_price
+                exit_reason = "gap_stop"
+            else:
+                fill_price = position.stop
+                exit_reason = "trail_stop" if position.highest_stop_step_r > 0 else "stop"
+            r = (position.entry_price - fill_price) / risk_per_share
             return {
                 "action": "exit",
-                "exit_reason": "trail_stop" if position.highest_stop_step_r > 0 else "stop",
-                "exit_price": position.stop, "realized_r": float(r),
+                "exit_reason": exit_reason,
+                "exit_price": fill_price, "realized_r": float(r),
                 "bars_held": position.bars_held,
                 "mfe_r": float(mfe_r), "mae_r": float(mae_r),
             }
         if low <= position.target:
-            r = (position.entry_price - position.target) / risk_per_share
+            open_price = current_bar.get("open", position.target)
+            fill_price = min(position.target, open_price) if open_price < position.target else position.target
+            exit_reason = "gap_target" if open_price < position.target else "target"
+            r = (position.entry_price - fill_price) / risk_per_share
             return {
-                "action": "exit", "exit_reason": "target",
-                "exit_price": position.target, "realized_r": float(r),
+                "action": "exit", "exit_reason": exit_reason,
+                "exit_price": fill_price, "realized_r": float(r),
                 "bars_held": position.bars_held,
                 "mfe_r": float(mfe_r), "mae_r": float(mae_r),
             }
